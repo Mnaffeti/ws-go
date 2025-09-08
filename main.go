@@ -8,10 +8,21 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Message defines the structure of a jury vote
+type JuryRole string
+
+const (
+	JuryLeft   JuryRole = "LEFT"
+	JuryRight  JuryRole = "RIGHT"
+	JuryCenter JuryRole = "CENTER"
+)
+
 type Message struct {
-	Jury int    `json:"jury"`
-	Vote string `json:"vote"`
+	Jury JuryRole `json:"jury"`
+	Vote string   `json:"vote"`
+}
+
+func (j JuryRole) IsValid() bool {
+	return j == JuryLeft || j == JuryRight || j == JuryCenter
 }
 
 // WebSocket upgrader
@@ -31,7 +42,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	defer ws.Close()
 
 	clients[ws] = true
-	log.Println("New client connected")
+	log.Println("New Jury connected")
 
 	for {
 		var msg Message
@@ -42,22 +53,65 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			delete(clients, ws)
 			break
 		}
-		log.Printf("Received -> Jury %d: %s", msg.Jury, msg.Vote)
+		if !msg.Jury.IsValid() {
+			log.Printf("Invalid jury role: %s", msg.Jury)
+			delete(clients, ws)
+			break
+		}
+		log.Printf("Received -> Jury %s: %s", msg.Jury, msg.Vote)
 		// Send to broadcast channel
 		broadcast <- msg
 	}
 }
 
 // Handle broadcasting messages to all clients
+// Track votes from each jury
+var juryVotes = make(map[JuryRole]string)
+
 func handleMessages() {
 	for {
 		msg := <-broadcast
-		for client := range clients {
-			err := client.WriteJSON(msg)
-			if err != nil {
-				log.Printf("error: %v", err)
-				client.Close()
-				delete(clients, client)
+		// Record the vote for the jury
+		juryVotes[msg.Jury] = msg.Vote
+
+		// Check if all three juries have voted
+		if len(juryVotes) == 3 {
+			// Count votes
+			voteCount := make(map[string]int)
+			for _, vote := range juryVotes {
+				voteCount[vote]++
+			}
+			// Find majority
+			var majorityVote string
+			var maxCount int
+			for vote, count := range voteCount {
+				if count > maxCount {
+					majorityVote = vote
+					maxCount = count
+				}
+			}
+			log.Printf("All juries voted. Majority decision: %s", majorityVote)
+			// Optionally, broadcast the decision to all clients
+			decisionMsg := Message{Jury: "FINAL", Vote: majorityVote}
+			for client := range clients {
+				err := client.WriteJSON(decisionMsg)
+				if err != nil {
+					log.Printf("error: %v", err)
+					client.Close()
+					delete(clients, client)
+				}
+			}
+			// Reset for next round
+			juryVotes = make(map[JuryRole]string)
+		} else {
+			// Broadcast the individual vote as before
+			for client := range clients {
+				err := client.WriteJSON(msg)
+				if err != nil {
+					log.Printf("error: %v", err)
+					client.Close()
+					delete(clients, client)
+				}
 			}
 		}
 	}
@@ -72,7 +126,7 @@ func main() {
 
 	go handleMessages()
 
-	fmt.Println("Server started on :8080 (LAN safe)")
+	fmt.Println("IPF server started on :8080 (LAN safe)")
 	err := http.ListenAndServe("0.0.0.0:8080", nil) // listen on all interfaces
 	if err != nil {
 		log.Fatal("ListenAndServe: ", err)
